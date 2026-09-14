@@ -1,26 +1,154 @@
 ---
 title: "ST 588 Project 1"
+author: "Divya Shah"
 format: html
-editor: visual
 ---
 
-## Quarto
+## Introduction
 
-Quarto enables you to weave together content and executable code into a finished document. To learn more about Quarto see <https://quarto.org>.
+The goal of this project is to create functions that retrieve, process, summarize, and visualize data from the Public Use Microdata Sample (PUMS) Census API. The project will use PUMS data from 2021 through 2024. The first step is to collect information about the variables that will be used later in the project.
 
-## Running Code
+## Part 1: Data Processing
 
-When you click the **Render** button a document will be generated that includes both content and the output of embedded code. You can embed code like this:
+### Parsing Variable Values
 
-```{r}
-1 + 1
-```
-
-You can add options to executable code like this
+Before querying the PUMS API, I first need information about the variables used in each year of the data. The Census API provides a JSON file containing descriptions and possible values for its variables. I will create a function that retrieves this information and keeps only the variables needed for this project.
 
 ```{r}
-#| echo: false
-2 * 2
+#| label: setup
+#| warning: false
+#| message: false
+
+library(httr)
+library(jsonlite)
 ```
 
-The `echo: false` option disables the printing of code (only output is displayed).
+The variables needed for this project include numeric variables, categorical variables, and geographic variables. The state variable is named `ST` in 2021 and 2022 and `STATE` in 2023 and 2024, so the function accounts for this difference.
+
+```{r}
+#| label: variable-values-function
+
+get_variable_values <- function(year) {
+  
+  # Check that the requested year is valid
+  if (!year %in% 2021:2024) {
+    stop("Year must be 2021, 2022, 2023, or 2024.")
+  }
+  
+  # Create the URL for the Census variable information
+  url <- paste0(
+    "https://api.census.gov/data/",
+    year,
+    "/acs/acs1/pums/variables.json"
+  )
+  
+  # Request the JSON file
+  response <- GET(url)
+  
+  # Stop if the request was not successful
+  stop_for_status(response)
+  
+  # Convert the response from JSON into an R list
+  variable_data <- fromJSON(
+    content(response, as = "text", encoding = "UTF-8"),
+    simplifyVector = FALSE
+  )
+  
+  # Variables required for every year
+  variables <- c(
+    "AGEP",
+    "GASP",
+    "GRPIP",
+    "JWAP",
+    "JWDP",
+    "JWMNP",
+    "PWGTP",
+    "FER",
+    "HHL",
+    "SCH",
+    "SCHL",
+    "SEX",
+    "REGION",
+    "DIVISION"
+  )
+  
+  # State has a different variable name depending on the year
+  if (year %in% c(2021, 2022)) {
+    variables <- c(variables, "ST")
+  } else {
+    variables <- c(variables, "STATE")
+  }
+  
+  # Pull out the possible values for each required variable
+  variable_values <- lapply(
+    variables,
+    function(variable) {
+      variable_data$variables[[variable]]$values
+    }
+  )
+  
+  # Give each list element the corresponding variable name
+  names(variable_values) <- variables
+  
+  return(variable_values)
+}
+```
+
+Next, I use the function for each of the four survey years.
+
+```{r}
+#| label: create-year-lists
+
+variable_values_2021 <- get_variable_values(2021)
+variable_values_2022 <- get_variable_values(2022)
+variable_values_2023 <- get_variable_values(2023)
+variable_values_2024 <- get_variable_values(2024)
+```
+
+The four year-specific lists can then be stored together in one object. This will make it easier to access the correct set of variable values later based on the year selected by the user.
+
+```{r}
+#| label: combine-variable-lists
+
+variable_values <- list(
+  `2021` = variable_values_2021,
+  `2022` = variable_values_2022,
+  `2023` = variable_values_2023,
+  `2024` = variable_values_2024
+)
+```
+
+I can check the names of the variables stored for 2024 to make sure the expected variables were returned.
+
+```{r}
+#| label: check-variable-names
+
+names(variable_values$`2024`)
+```
+
+I can also check one categorical variable to verify that its coded values and labels were successfully parsed.
+
+```{r}
+#| label: check-sex-values
+
+variable_values$`2024`$SEX$item
+```
+
+The Census metadata stores variables such as `SEX` with coded values and descriptive labels, while numeric variables can contain allowable ranges.
+
+Finally, I save the combined list as an RDS file in the project's `data` folder. This file can be loaded later when the Census API functions need variable levels or valid geographic values.
+
+```{r}
+#| label: save-variable-values
+
+if (!dir.exists("data")) {
+  dir.create("data")
+}
+
+saveRDS(
+  variable_values,
+  "data/variable_values.rds"
+)
+```
+
+The resulting RDS file contains the variable information for all four survey years and can now be reused throughout the rest of the project without repeatedly downloading the variable descriptions.
