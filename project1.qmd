@@ -945,3 +945,231 @@ class(multi_year_example)
 ```
 
 The two query functions now provide a consistent way to retrieve and process PUMS data for either a single survey year or several survey years. The returned objects contain the variable types needed for later analysis and use the `census` class so that custom summary and plotting methods can be created in the next part of the project.
+
+## Part 2: Generic Summary and Plotting Functions
+
+### Creating a Custom Census Summary
+
+The rows in the PUMS data do not necessarily represent one individual person. Instead, `PWGTP` gives the number of people represented by each row. Because of this, ordinary unweighted summaries would not accurately describe the population.
+
+I will create a custom `summary()` method for objects with the `census` class. For numeric variables, the function calculates weighted means and weighted standard deviations using `PWGTP`. For categorical variables, it calculates weighted counts. Time variables are not included in the numeric summaries.
+
+```{r}
+#| label: census-summary-function
+
+summary.census <- function(
+    object,
+    numeric_vars = NULL,
+    categorical_vars = NULL,
+    ...) {
+  
+  
+  # -----------------------------
+  # Check for PWGTP
+  # -----------------------------
+  
+  if (!"PWGTP" %in% names(object)) {
+    stop(
+      "The census object must contain PWGTP."
+    )
+  }
+  
+  
+  # -----------------------------
+  # Identify available variables
+  # -----------------------------
+  
+  available_numeric <- names(object)[
+    vapply(
+      object,
+      function(x) {
+        is.numeric(x) &&
+          !inherits(x, "hms") &&
+          !inherits(x, "difftime")
+      },
+      logical(1)
+    )
+  ]
+  
+  # PWGTP is used as the weight,
+  # so it is not summarized itself
+  available_numeric <- setdiff(
+    available_numeric,
+    "PWGTP"
+  )
+  
+  
+  available_categorical <- names(object)[
+    vapply(
+      object,
+      function(x) {
+        is.factor(x) ||
+          is.character(x)
+      },
+      logical(1)
+    )
+  ]
+  
+  
+  # -----------------------------
+  # Default variables
+  # -----------------------------
+  
+  if (is.null(numeric_vars)) {
+    numeric_vars <- available_numeric
+  }
+  
+  if (is.null(categorical_vars)) {
+    categorical_vars <-
+      available_categorical
+  }
+  
+  
+  # -----------------------------
+  # Check numeric selections
+  # -----------------------------
+  
+  if (
+    any(
+      !numeric_vars %in%
+        available_numeric
+    )
+  ) {
+    stop(
+      paste(
+        "All numeric_vars must be numeric",
+        "variables in the census object",
+        "other than PWGTP or time variables."
+      )
+    )
+  }
+  
+  
+  # -----------------------------
+  # Check categorical selections
+  # -----------------------------
+  
+  if (
+    any(
+      !categorical_vars %in%
+        available_categorical
+    )
+  ) {
+    stop(
+      paste(
+        "All categorical_vars must be",
+        "categorical variables in the census object."
+      )
+    )
+  }
+  
+  
+  # -----------------------------
+  # Store final results
+  # -----------------------------
+  
+  summary_results <- list()
+  
+  weights <- object$PWGTP
+  
+  
+  # -----------------------------
+  # Numeric summaries
+  # -----------------------------
+  
+  for (variable in numeric_vars) {
+    
+    values <- object[[variable]]
+    
+    complete_rows <- (
+      !is.na(values) &
+      !is.na(weights)
+    )
+    
+    x <- values[complete_rows]
+    w <- weights[complete_rows]
+    
+    
+    # Weighted mean
+    weighted_mean <- sum(
+      x * w
+    ) / sum(w)
+    
+    
+    # Weighted standard deviation
+    weighted_sd <- sqrt(
+      sum(
+        x^2 * w
+      ) / sum(w) -
+        weighted_mean^2
+    )
+    
+    
+    summary_results[[variable]] <- c(
+      mean = weighted_mean,
+      sd = weighted_sd
+    )
+  }
+  
+  
+  # -----------------------------
+  # Categorical summaries
+  # -----------------------------
+  
+  for (variable in categorical_vars) {
+    
+    values <- object[[variable]]
+    
+    complete_rows <- (
+      !is.na(values) &
+      !is.na(weights)
+    )
+    
+    x <- values[complete_rows]
+    w <- weights[complete_rows]
+    
+    
+    # Remove unused factor levels
+    if (is.factor(x)) {
+      x <- droplevels(x)
+      }
+    # Weighted count for each observed level
+    weighted_counts <- tapply(
+      w,
+      x,
+      sum
+      )
+    
+    
+    summary_results[[variable]] <-
+      weighted_counts
+  }
+  
+  
+  return(summary_results)
+}
+```
+
+I can first test the new method using the multi-year census object created earlier. Calling the generic `summary()` function should automatically use `summary.census()` because the object has the `census` class.
+
+```{r}
+#| label: test-census-summary-default
+
+summary(multi_year_example)
+```
+
+By default, the function summarizes all ordinary numeric variables except `PWGTP` and all categorical variables in the object. In this example, `AGEP` receives a weighted mean and standard deviation, while `SEX`, `State`, and `year` receive weighted counts.
+
+The user can also select only the variables they are interested in. For example, I can summarize age numerically and sex categorically.
+
+```{r}
+#| label: test-census-summary-selected
+
+summary(
+  multi_year_example,
+  numeric_vars = "AGEP",
+  categorical_vars = "SEX"
+)
+```
+
+This custom method now provides population-weighted summaries for objects returned by the PUMS query functions. Using `PWGTP` ensures that rows representing more people contribute more heavily to the resulting statistics.
