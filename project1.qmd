@@ -223,3 +223,725 @@ head(test_pums)
 ```
 
 The API response has now been converted into a tibble with variable names as the column names. This helper function can be reused when I create a more flexible PUMS query function in the next step.
+
+### Creating a Flexible PUMS Query Function
+
+Now that I can successfully request data from the Census API and convert the response into a tibble, I can create a more flexible function. This function allows the user to choose the survey year, numeric variables, categorical variables, and a geographic subset.
+
+The function also checks the inputs before making the API request. Only the years and variables required for this project are allowed. The person weight variable, `PWGTP`, must always be included along with at least one other numeric variable.
+
+Before writing the main function, I create a few helper functions that will be useful for converting coded Census values.
+
+```{r}
+#| label: query-helper-functions
+
+# Remove unnecessary leading zeros when comparing Census codes
+normalize_code <- function(x) {
+  
+  x <- as.character(x)
+  numeric_x <- suppressWarnings(as.numeric(x))
+  
+  result <- x
+  
+  result[!is.na(numeric_x)] <- as.character(
+    numeric_x[!is.na(numeric_x)]
+  )
+  
+  return(result)
+}
+
+
+# Convert a coded Census variable into a factor
+# using the labels stored in the RDS metadata
+make_factor_from_metadata <- function(x, metadata_values) {
+  
+  if (is.null(metadata_values$item)) {
+    return(factor(x))
+  }
+  
+  lookup <- unlist(
+    metadata_values$item,
+    use.names = TRUE
+  )
+  
+  level_codes <- normalize_code(names(lookup))
+  
+  # Avoid duplicate levels after removing leading zeros
+  keep <- !duplicated(level_codes)
+  
+  factor(
+    normalize_code(x),
+    levels = level_codes[keep],
+    labels = unname(lookup)[keep]
+  )
+}
+```
+
+Two of the allowed variables, `JWAP` and `JWDP`, represent times rather than ordinary numeric measurements. Their Census codes correspond to time intervals. I use the variable descriptions saved earlier to find each interval and return the midpoint of that interval as a time value. Values that do not represent an actual time interval are returned as missing values.
+
+```{r}
+#| label: time-helper-function
+
+parse_time_midpoint <- function(x, metadata_values) {
+  
+  lookup <- unlist(
+    metadata_values$item,
+    use.names = TRUE
+  )
+  
+  # Match codes even if leading zeros differ
+  normalized_names <- normalize_code(names(lookup))
+  
+  label_lookup <- setNames(
+    unname(lookup),
+    normalized_names
+  )
+  
+  descriptions <- unname(
+    label_lookup[normalize_code(x)]
+  )
+  
+  
+  # Convert a clock time such as "10:20 a.m."
+  # to seconds after midnight
+  clock_to_seconds <- function(clock_text) {
+    
+    clean_text <- gsub(
+      "a.m.",
+      "AM",
+      clock_text,
+      fixed = TRUE
+    )
+    
+    clean_text <- gsub(
+      "p.m.",
+      "PM",
+      clean_text,
+      fixed = TRUE
+    )
+    
+    parsed_time <- strptime(
+      clean_text,
+      format = "%I:%M %p",
+      tz = "UTC"
+    )
+    
+    if (is.na(parsed_time)[1]) {
+      return(NA_real_)
+    }
+    
+    hour <- as.numeric(
+      format(parsed_time, "%H")
+    )
+    
+    minute <- as.numeric(
+      format(parsed_time, "%M")
+    )
+    
+    return(
+      hour * 3600 + minute * 60
+    )
+  }
+  
+  
+  # Find the midpoint of one Census time interval
+  find_midpoint <- function(description) {
+    
+    if (
+      is.na(description) ||
+      !grepl(" to ", description, fixed = TRUE)
+    ) {
+      return(NA_real_)
+    }
+    
+    time_parts <- strsplit(
+      description,
+      " to ",
+      fixed = TRUE
+    )[[1]]
+    
+    if (length(time_parts) != 2) {
+      return(NA_real_)
+    }
+    
+    start_seconds <- clock_to_seconds(
+      time_parts[1]
+    )
+    
+    end_seconds <- clock_to_seconds(
+      time_parts[2]
+    )
+    
+    if (
+      is.na(start_seconds) ||
+      is.na(end_seconds)
+    ) {
+      return(NA_real_)
+    }
+    
+    # Account for intervals that cross midnight
+    if (end_seconds < start_seconds) {
+      end_seconds <- end_seconds + 24 * 60 * 60
+    }
+    
+    midpoint_seconds <- (
+      start_seconds + end_seconds
+    ) / 2
+    
+    return(
+      midpoint_seconds %% (24 * 60 * 60)
+    )
+  }
+  
+  
+  midpoint_seconds <- vapply(
+    descriptions,
+    find_midpoint,
+    numeric(1)
+  )
+  
+  return(
+    hms::as_hms(midpoint_seconds)
+  )
+}
+```
+
+I can now create the main function for querying a single year of PUMS data. The default year is 2024, the default numeric variables are `AGEP` and `PWGTP`, the default categorical variable is `SEX`, and the default geography is State.
+
+```{r}
+#| label: single-year-pums-function
+
+query_pums <- function(
+    year = 2024,
+    numeric_vars = c("AGEP", "PWGTP"),
+    categorical_vars = "SEX",
+    geography = "State",
+    geography_value = NULL) {
+  
+  
+  # -----------------------------
+  # Check the year
+  # -----------------------------
+  
+  if (
+    length(year) != 1 ||
+    is.na(year) ||
+    !year %in% 2021:2024
+  ) {
+    stop(
+      "Year must be one of 2021, 2022, 2023, or 2024."
+    )
+  }
+  
+  
+  # -----------------------------
+  # Allowed variables
+  # -----------------------------
+  
+  allowed_numeric <- c(
+    "AGEP",
+    "GASP",
+    "GRPIP",
+    "JWAP",
+    "JWDP",
+    "JWMNP",
+    "PWGTP"
+  )
+  
+  allowed_categorical <- c(
+    "FER",
+    "HHL",
+    "SCH",
+    "SCHL",
+    "SEX"
+  )
+  
+  
+  # -----------------------------
+  # Check numeric variables
+  # -----------------------------
+  
+  if (
+    length(numeric_vars) < 2 ||
+    !"PWGTP" %in% numeric_vars ||
+    length(setdiff(numeric_vars, "PWGTP")) < 1
+  ) {
+    stop(
+      paste(
+        "Numeric variables must include PWGTP",
+        "and at least one other numeric variable."
+      )
+    )
+  }
+  
+  if (
+    any(!numeric_vars %in% allowed_numeric)
+  ) {
+    stop(
+      "An invalid numeric variable was selected."
+    )
+  }
+  
+  
+  # -----------------------------
+  # Check categorical variables
+  # -----------------------------
+  
+  if (
+    length(categorical_vars) < 1
+  ) {
+    stop(
+      "At least one categorical variable must be selected."
+    )
+  }
+  
+  if (
+    any(!categorical_vars %in% allowed_categorical)
+  ) {
+    stop(
+      "An invalid categorical variable was selected."
+    )
+  }
+  
+  
+  # -----------------------------
+  # Check geography
+  # -----------------------------
+  
+  valid_geographies <- c(
+    "State",
+    "Division",
+    "Region"
+  )
+  
+  if (
+    length(geography) != 1 ||
+    !geography %in% valid_geographies
+  ) {
+    stop(
+      paste(
+        "Geography must be exactly one of",
+        "State, Division, or Region."
+      )
+    )
+  }
+  
+  if (
+    !is.null(geography_value) &&
+    length(geography_value) != 1
+  ) {
+    stop(
+      "Only one geography value may be supplied."
+    )
+  }
+  
+  
+  # -----------------------------
+  # Load variable metadata
+  # -----------------------------
+  
+  variable_metadata <- readRDS(
+    "data/variable_values.rds"
+  )
+  
+  year_metadata <- variable_metadata[[
+    as.character(year)
+  ]]
+  
+  
+  # State has a different variable name
+  # in 2021/2022 and 2023/2024
+  geography_variable <- switch(
+    geography,
+    
+    "State" = if (
+      year %in% c(2021, 2022)
+    ) {
+      "ST"
+    } else {
+      "STATE"
+    },
+    
+    "Division" = "DIVISION",
+    "Region" = "REGION"
+  )
+  
+  
+  geography_lookup <- unlist(
+    year_metadata[[geography_variable]]$item,
+    use.names = TRUE
+  )
+  
+  valid_geography_codes <- names(
+    geography_lookup
+  )
+  
+  
+  # -----------------------------
+  # Choose default geography
+  # -----------------------------
+  
+  if (is.null(geography_value)) {
+    
+    geography_value <- switch(
+      geography,
+      "State" = "37",
+      "Division" = "5",
+      "Region" = "3"
+    )
+  }
+  
+  geography_value <- as.character(
+    geography_value
+  )
+  
+  
+  # -----------------------------
+  # Handle "all"
+  # -----------------------------
+  
+  if (
+    tolower(geography_value) == "all"
+  ) {
+    
+    api_geography_value <- "*"
+    
+  } else {
+    
+    geography_match <- match(
+      normalize_code(geography_value),
+      normalize_code(valid_geography_codes)
+    )
+    
+    if (is.na(geography_match)) {
+      stop(
+        paste(
+          "The selected geography value is not valid",
+          "for this year and geography level."
+        )
+      )
+    }
+    
+    # Keep the original Census code
+    api_geography_value <-
+      valid_geography_codes[
+        geography_match
+      ]
+  }
+  
+  
+  # -----------------------------
+  # Variables to request
+  # -----------------------------
+  
+  return_variables <- unique(
+    c(
+      numeric_vars,
+      categorical_vars
+    )
+  )
+  
+  
+  # -----------------------------
+  # Census API key
+  # -----------------------------
+  
+  census_key <- Sys.getenv(
+    "CENSUS_API_KEY"
+  )
+  
+  if (!nzchar(census_key)) {
+    stop(
+      paste(
+        "CENSUS_API_KEY was not found.",
+        "Add the key to your .Renviron file."
+      )
+    )
+  }
+  
+  
+  # -----------------------------
+  # Create and send API request
+  # -----------------------------
+  
+  base_url <- paste0(
+    "https://api.census.gov/data/",
+    year,
+    "/acs/acs1/pums"
+  )
+  
+  response <- GET(
+    base_url,
+    query = list(
+      get = paste(
+        return_variables,
+        collapse = ","
+      ),
+      `for` = paste0(
+        tolower(geography),
+        ":",
+        api_geography_value
+      ),
+      key = census_key
+    )
+  )
+  
+  
+  # Convert the response into a tibble
+  pums_data <- response_to_tibble(
+    response
+  )
+  
+  
+  # -----------------------------
+  # Convert ordinary numeric data
+  # -----------------------------
+  
+  time_variables <- intersect(
+    numeric_vars,
+    c("JWAP", "JWDP")
+  )
+  
+  ordinary_numeric <- setdiff(
+    numeric_vars,
+    time_variables
+  )
+  
+  for (variable in ordinary_numeric) {
+    
+    pums_data[[variable]] <-
+      as.numeric(
+        pums_data[[variable]]
+      )
+  }
+  
+  
+  # -----------------------------
+  # Convert time variables
+  # -----------------------------
+  
+  for (variable in time_variables) {
+    
+    pums_data[[variable]] <-
+      parse_time_midpoint(
+        pums_data[[variable]],
+        year_metadata[[variable]]
+      )
+  }
+  
+  
+  # -----------------------------
+  # Convert categorical variables
+  # -----------------------------
+  
+  for (variable in categorical_vars) {
+    
+    pums_data[[variable]] <-
+      make_factor_from_metadata(
+        pums_data[[variable]],
+        year_metadata[[variable]]
+      )
+  }
+  
+  
+  # -----------------------------
+  # Convert geography to a factor
+  # -----------------------------
+  
+  geography_column <- tolower(
+    geography
+  )
+  
+  pums_data[[geography_column]] <-
+    make_factor_from_metadata(
+      pums_data[[geography_column]],
+      year_metadata[[geography_variable]]
+    )
+  
+  
+  # Rename geography column
+  names(pums_data)[
+    names(pums_data) == geography_column
+  ] <- geography
+  
+  
+  # -----------------------------
+  # Add census class
+  # -----------------------------
+  
+  class(pums_data) <- c(
+    "census",
+    class(pums_data)
+  )
+  
+  return(pums_data)
+}
+```
+
+I can test the function by requesting age, person weight, and sex for one state. I use the District of Columbia for this example because it gives a smaller data set while still testing the State geography option.
+
+```{r}
+#| label: test-single-year-function
+
+single_year_example <- query_pums(
+  year = 2024,
+  numeric_vars = c(
+    "AGEP",
+    "PWGTP"
+  ),
+  categorical_vars = "SEX",
+  geography = "State",
+  geography_value = "11"
+)
+
+head(single_year_example)
+
+class(single_year_example)
+```
+
+The returned object should contain numeric age and person-weight values, labeled categorical values, and a labeled geography. It also receives the `census` class that will be used later when creating custom summary and plotting methods.
+
+The time conversion can also be tested by requesting the departure-for-work variable, `JWDP`. Missing or non-worker values are represented as `NA`, while valid Census time intervals are converted to their midpoint.
+
+```{r}
+#| label: test-time-variable
+
+time_example <- query_pums(
+  year = 2024,
+  numeric_vars = c(
+    "JWDP",
+    "PWGTP"
+  ),
+  categorical_vars = "SEX",
+  geography = "State",
+  geography_value = "11"
+)
+
+head(
+  time_example[
+    !is.na(time_example$JWDP),
+  ]
+)
+```
+
+### Combining Multiple Survey Years
+
+The single-year function can now be reused to retrieve more than one survey year. Rather than repeating the entire API process, I create a second function that calls `query_pums()` once for each requested year and combines the results into one tibble. A `year` variable is included so observations from the different surveys can be identified.
+
+```{r}
+#| label: multi-year-pums-function
+
+query_pums_years <- function(
+    years,
+    numeric_vars = c("AGEP", "PWGTP"),
+    categorical_vars = "SEX",
+    geography = "State",
+    geography_value = NULL) {
+  
+  
+  # -----------------------------
+  # Check years
+  # -----------------------------
+  
+  if (
+    length(years) < 1 ||
+    any(is.na(years)) ||
+    any(!years %in% 2021:2024)
+  ) {
+    stop(
+      paste(
+        "Years must contain one or more values",
+        "from 2021, 2022, 2023, and 2024."
+      )
+    )
+  }
+  
+  years <- unique(years)
+  
+  
+  # -----------------------------
+  # Query each year
+  # -----------------------------
+  
+  year_data <- lapply(
+    years,
+    function(current_year) {
+      
+      one_year <- query_pums(
+        year = current_year,
+        numeric_vars = numeric_vars,
+        categorical_vars = categorical_vars,
+        geography = geography,
+        geography_value = geography_value
+      )
+      
+      # Remove census class temporarily
+      # before combining the data
+      class(one_year) <- setdiff(
+        class(one_year),
+        "census"
+      )
+      
+      one_year$year <-
+        as.character(current_year)
+      
+      return(one_year)
+    }
+  )
+  
+  
+  # -----------------------------
+  # Combine years
+  # -----------------------------
+  
+  combined_data <- do.call(
+    rbind,
+    year_data
+  )
+  
+  combined_data <- tibble::as_tibble(
+    combined_data
+  )
+  
+  
+  # Treat year as categorical
+  combined_data$year <- factor(
+    combined_data$year,
+    levels = as.character(years)
+  )
+  
+  
+  # Add census class
+  class(combined_data) <- c(
+    "census",
+    class(combined_data)
+  )
+  
+  return(combined_data)
+}
+```
+
+I can test the multiple-year function using the 2023 and 2024 surveys. The resulting data should contain observations from both years and retain the `census` class.
+
+```{r}
+#| label: test-multi-year-function
+
+multi_year_example <- query_pums_years(
+  years = c(2023, 2024),
+  numeric_vars = c(
+    "AGEP",
+    "PWGTP"
+  ),
+  categorical_vars = "SEX",
+  geography = "State",
+  geography_value = "11"
+)
+
+head(multi_year_example)
+
+table(multi_year_example$year)
+
+class(multi_year_example)
+```
+
+The two query functions now provide a consistent way to retrieve and process PUMS data for either a single survey year or several survey years. The returned objects contain the variable types needed for later analysis and use the `census` class so that custom summary and plotting methods can be created in the next part of the project.
