@@ -1173,3 +1173,228 @@ summary(
 ```
 
 This custom method now provides population-weighted summaries for objects returned by the PUMS query functions. Using `PWGTP` ensures that rows representing more people contribute more heavily to the resulting statistics.
+
+### Creating a Custom Census Plot
+
+In addition to numerical summaries, I can create a custom plotting method for objects with the `census` class. The plot will compare one numeric variable across the levels of one categorical variable using a boxplot.
+
+Because each row of the PUMS data can represent a different number of people, `PWGTP` is included as the weight in the plot.
+
+```{r}
+#| label: census-plot-function
+
+plot.census <- function(
+    x,
+    cat_var,
+    num_var,
+    ...) {
+  
+  
+  # -----------------------------
+  # Check for PWGTP
+  # -----------------------------
+  
+  if (!"PWGTP" %in% names(x)) {
+    stop(
+      "The census object must contain PWGTP."
+    )
+  }
+  
+  
+  # -----------------------------
+  # Check variable names
+  # -----------------------------
+  
+  if (
+    length(cat_var) != 1 ||
+    !cat_var %in% names(x)
+  ) {
+    stop(
+      "cat_var must be one categorical variable in the census object."
+    )
+  }
+  
+  if (
+    length(num_var) != 1 ||
+    !num_var %in% names(x)
+  ) {
+    stop(
+      "num_var must be one numeric variable in the census object."
+    )
+  }
+  
+  
+  # -----------------------------
+  # Check variable types
+  # -----------------------------
+  
+  if (
+    !is.factor(x[[cat_var]]) &&
+    !is.character(x[[cat_var]])
+  ) {
+    stop(
+      "cat_var must be a categorical variable."
+    )
+  }
+  
+  if (
+    !is.numeric(x[[num_var]]) ||
+    inherits(x[[num_var]], "hms") ||
+    inherits(x[[num_var]], "difftime")
+  ) {
+    stop(
+      "num_var must be an ordinary numeric variable."
+    )
+  }
+  
+  
+  # -----------------------------
+  # Create weighted boxplot
+  # -----------------------------
+  
+  plot_object <- ggplot2::ggplot(
+    x,
+    ggplot2::aes(
+      x = .data[[cat_var]],
+      y = .data[[num_var]],
+      weight = .data[["PWGTP"]]
+    )
+  ) +
+    ggplot2::geom_boxplot(
+      na.rm = TRUE
+    ) +
+    ggplot2::labs(
+      title = paste(
+        num_var,
+        "by",
+        cat_var
+      ),
+      x = cat_var,
+      y = num_var
+    ) +
+    ggplot2::theme_minimal()
+  
+  return(plot_object)
+}
+```
+
+I can test the plotting method using the multi-year census object from earlier. Since `year` is stored as a categorical variable, I can compare the age distribution between the two survey years.
+
+```{r}
+#| label: test-census-plot
+
+plot(
+  multi_year_example,
+  cat_var = "year",
+  num_var = "AGEP"
+)
+```
+
+The custom method recognizes that the object has the `census` class and automatically uses `plot.census()`. The boxplot is weighted using `PWGTP`, so observations representing more people contribute appropriately to the plotted distributions.
+
+## Investigation: Age Patterns in the District of Columbia
+
+To demonstrate the functions created in this project, I will investigate age patterns in the District of Columbia from 2021 through 2024. I will compare the age distributions across survey years and between males and females.
+
+I first use the multiple-year PUMS function to retrieve age, person weight, and sex for all four survey years.
+
+```{r}
+#| label: investigation-data
+
+dc_investigation <- query_pums_years(
+  years = 2021:2024,
+  numeric_vars = c(
+    "AGEP",
+    "PWGTP"
+  ),
+  categorical_vars = "SEX",
+  geography = "State",
+  geography_value = "11"
+)
+
+head(dc_investigation)
+```
+
+I can begin with a weighted summary of the full data set. This gives the overall weighted mean and standard deviation of age as well as weighted population counts by sex and survey year.
+
+```{r}
+#| label: investigation-overall-summary
+
+summary(
+  dc_investigation,
+  numeric_vars = "AGEP",
+  categorical_vars = c(
+    "SEX",
+    "year"
+  )
+)
+```
+
+To examine the years separately, I can apply the custom summary method to each individual survey year. This provides a weighted age mean and standard deviation for each year along with weighted counts by sex.
+
+```{r}
+#| label: investigation-year-summaries
+
+investigation_years <- levels(
+  dc_investigation$year
+)
+
+year_summaries <- lapply(
+  investigation_years,
+  function(current_year) {
+    
+    one_year <- dc_investigation[
+      dc_investigation$year ==
+        current_year,
+    ]
+    
+    # Make sure the subset retains
+    # the custom census class
+    if (!"census" %in% class(one_year)) {
+      class(one_year) <- c(
+        "census",
+        class(one_year)
+      )
+    }
+    
+    summary(
+      one_year,
+      numeric_vars = "AGEP",
+      categorical_vars = "SEX"
+    )
+  }
+)
+
+names(year_summaries) <-
+  investigation_years
+
+year_summaries
+```
+
+The custom plotting function can also be used in multiple ways. First, I compare the weighted age distributions across the four survey years.
+
+```{r}
+#| label: investigation-age-by-year
+
+plot(
+  dc_investigation,
+  cat_var = "year",
+  num_var = "AGEP"
+)
+```
+
+This plot allows the age distributions for 2021 through 2024 to be compared directly.
+
+Next, I compare the weighted age distribution between males and females across the combined survey data.
+
+```{r}
+#| label: investigation-age-by-sex
+
+plot(
+  dc_investigation,
+  cat_var = "SEX",
+  num_var = "AGEP"
+)
+```
+
+Overall, the age distribution in the District of Columbia appears very stable from 2021 through 2024. The weighted mean age stays close to 37 years in every survey year, and the yearly boxplots show very similar medians and spreads. The weighted population counts also show more females than males in each year, although the male and female age distributions are very similar. These results suggest that the overall age structure of the District of Columbia changed very little across the four survey years.
