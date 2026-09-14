@@ -152,3 +152,74 @@ saveRDS(
 ```
 
 The resulting RDS file contains the variable information for all four survey years and can now be reused throughout the rest of the project without repeatedly downloading the variable descriptions.
+
+### Parsing API Data
+
+The next step is to retrieve data from the PUMS Census API. Before creating a more flexible function, I will first test the API using a fixed URL. This will allow me to make sure that the request works and that the returned data can be converted into a useful format.
+
+For this initial example, I request age, person weight, and sex from the 2024 PUMS data.
+
+```{r}
+#| label: test-api-request
+
+census_key <- Sys.getenv("CENSUS_API_KEY")
+
+test_url <- paste0(
+  "https://api.census.gov/data/2024/acs/acs1/pums",
+  "?get=AGEP,PWGTP,SEX",
+  "&for=state:37",
+  "&SCHL=24",
+  "&key=", census_key
+)
+
+test_response <- GET(test_url)
+
+status_code(test_response)
+```
+
+A successful Census API request returns the data as a JSON array. The first row contains the variable names, while the remaining rows contain the observations. I will create a helper function that converts this response into a tibble.
+
+```{r}
+#| label: response-to-tibble
+
+response_to_tibble <- function(response) {
+  
+  # Stop if the API request was unsuccessful
+  stop_for_status(response)
+  
+  # Parse the JSON response
+  api_data <- fromJSON(
+    content(response, as = "text", encoding = "UTF-8")
+  )
+  
+  # The first row contains the column names
+  column_names <- as.character(api_data[1, ])
+  
+  # The remaining rows contain the observations
+  data_values <- api_data[-1, , drop = FALSE]
+  
+  # Convert the observations to a data frame
+  result <- as.data.frame(
+    data_values,
+    stringsAsFactors = FALSE
+  )
+  
+  # Add the correct column names
+  names(result) <- column_names
+  
+  # Return as a tibble
+  tibble::as_tibble(result)
+}
+```
+
+I can now use the helper function on the API response and inspect the first few observations.
+
+```{r}
+#| label: test-response-parser
+
+test_pums <- response_to_tibble(test_response)
+
+head(test_pums)
+```
+
+The API response has now been converted into a tibble with variable names as the column names. This helper function can be reused when I create a more flexible PUMS query function in the next step.
