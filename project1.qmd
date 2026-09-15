@@ -1,7 +1,13 @@
 ---
 title: "ST 588 Project 1"
 author: "Divya Shah"
-format: html
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-overflow: wrap
+    embed-resources: true
+output-file: index.html
 ---
 
 ## Introduction
